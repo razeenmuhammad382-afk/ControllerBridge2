@@ -1,0 +1,536 @@
+name: Build Controller Bridge V3
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+
+  android:
+    name: Build Android V3
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Create Android folders
+        run: |
+          mkdir -p app/src/main/java/com/example/controllerbridge
+          mkdir -p app/src/main/res/values
+
+      - name: Create settings.gradle
+        run: |
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "ControllerBridge"
+          include ":app"
+          EOF
+
+      - name: Create build.gradle
+        run: |
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+      - name: Create app build.gradle
+        run: |
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.example.controllerbridge'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.example.controllerbridge"
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 3
+                  versionName "3.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+      - name: Create AndroidManifest
+        run: |
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <application
+                  android:theme="@style/AppTheme"
+                  android:label="Controller Bridge V3"
+                  android:allowBackup="false"
+                  android:supportsRtl="true">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:screenOrientation="portrait"
+                      android:exported="true">
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+
+                  </activity>
+
+              </application>
+
+          </manifest>
+          EOF
+
+      - name: Create theme
+        run: |
+          cat > app/src/main/res/values/styles.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="AppTheme"
+                  parent="android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:colorAccent">#3F51B5</item>
+              </style>
+          </resources>
+          EOF
+
+      - name: Create Android V3 MainActivity
+        run: |
+          cat > app/src/main/java/com/example/controllerbridge/MainActivity.java <<'EOF'
+          package com.example.controllerbridge;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.view.InputDevice;
+          import android.view.KeyEvent;
+          import android.view.MotionEvent;
+          import android.widget.*;
+          import java.io.OutputStream;
+          import java.net.Socket;
+          import java.util.Locale;
+          import java.util.HashSet;
+          import java.util.Set;
+
+          public class MainActivity extends Activity {
+
+              TextView controllerText;
+              TextView networkText;
+              TextView inputText;
+              TextView stickText;
+
+              EditText ipInput;
+              EditText portInput;
+
+              Socket socket;
+              OutputStream output;
+
+              volatile float lx, ly, rx, ry;
+              final Set<Integer> buttons = new HashSet<>();
+
+              volatile boolean connected = false;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+
+                  LinearLayout layout = new LinearLayout(this);
+                  layout.setOrientation(LinearLayout.VERTICAL);
+                  layout.setPadding(32,32,32,32);
+
+                  controllerText = text("🔴 Controller: not detected",20);
+                  networkText = text("🔴 Windows: disconnected",18);
+                  inputText = text("Last input: —",18);
+                  stickText = text(
+                      "Left stick: X 0.00 Y 0.00\nRight stick: X 0.00 Y 0.00",
+                      18
+                  );
+
+                  ipInput = new EditText(this);
+                  ipInput.setText("10.49.65.125");
+                  ipInput.setHint("Windows IP");
+
+                  portInput = new EditText(this);
+                  portInput.setText("5555");
+                  portInput.setHint("Port");
+                  portInput.setInputType(2);
+
+                  Button connect = new Button(this);
+                  connect.setText("CONNECT TO WINDOWS");
+                  connect.setOnClickListener(v -> connect());
+
+                  layout.addView(controllerText);
+                  layout.addView(networkText);
+                  layout.addView(inputText);
+                  layout.addView(stickText);
+                  layout.addView(ipInput);
+                  layout.addView(portInput);
+                  layout.addView(connect);
+
+                  setContentView(layout);
+
+                  updateController();
+              }
+
+              TextView text(String s, int size) {
+                  TextView t = new TextView(this);
+                  t.setText(s);
+                  t.setTextSize(size);
+                  t.setPadding(0,12,0,12);
+                  return t;
+              }
+
+              void connect() {
+
+                  String ip = ipInput.getText().toString().trim();
+                  int port = Integer.parseInt(
+                      portInput.getText().toString().trim()
+                  );
+
+                  networkText.setText("🟡 Connecting...");
+
+                  new Thread(() -> {
+
+                      try {
+
+                          if(socket != null)
+                              socket.close();
+
+                          socket = new Socket(ip,port);
+                          output = socket.getOutputStream();
+                          connected = true;
+
+                          runOnUiThread(() ->
+                              networkText.setText(
+                                  "🟢 Windows: connected"
+                              )
+                          );
+
+                          while(connected) {
+                              sendState();
+                              Thread.sleep(50);
+                          }
+
+                      } catch(Exception e) {
+
+                          connected = false;
+
+                          runOnUiThread(() ->
+                              networkText.setText(
+                                  "🔴 Network error: " +
+                                  e.getMessage()
+                              )
+                          );
+                      }
+
+                  }).start();
+              }
+
+              synchronized void sendState() {
+
+                  if(output == null)
+                      return;
+
+                  try {
+
+                      StringBuilder keys = new StringBuilder();
+
+                      for(Integer k : buttons) {
+
+                          if(keys.length() > 0)
+                              keys.append(",");
+
+                          keys.append(k);
+                      }
+
+                      String line = String.format(
+                          Locale.US,
+                          "V3|LX=%.3f|LY=%.3f|RX=%.3f|RY=%.3f|KEYS=%s\n",
+                          lx,ly,rx,ry,keys
+                      );
+
+                      output.write(line.getBytes("UTF-8"));
+                      output.flush();
+
+                  } catch(Exception e) {
+                      connected = false;
+                  }
+              }
+
+              @Override
+              public boolean dispatchKeyEvent(KeyEvent e) {
+
+                  int code = e.getKeyCode();
+
+                  if(e.getAction() == KeyEvent.ACTION_DOWN) {
+
+                      buttons.add(code);
+
+                      inputText.setText(
+                          "Button DOWN: " +
+                          getName(code)
+                      );
+
+                      sendState();
+                  }
+
+                  if(e.getAction() == KeyEvent.ACTION_UP) {
+
+                      buttons.remove(code);
+
+                      inputText.setText(
+                          "Button UP: " +
+                          getName(code)
+                      );
+
+                      sendState();
+                  }
+
+                  return true;
+              }
+
+              @Override
+              public boolean dispatchGenericMotionEvent(
+                  MotionEvent e
+              ) {
+
+                  if(e.getAction() == MotionEvent.ACTION_MOVE &&
+                     (e.getSource() &
+                      InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {
+
+                      lx = e.getAxisValue(MotionEvent.AXIS_X);
+                      ly = e.getAxisValue(MotionEvent.AXIS_Y);
+                      rx = e.getAxisValue(MotionEvent.AXIS_Z);
+                      ry = e.getAxisValue(MotionEvent.AXIS_RZ);
+
+                      stickText.setText(String.format(
+                          Locale.US,
+                          "Left stick: X %+.2f Y %+.2f\n" +
+                          "Right stick: X %+.2f Y %+.2f",
+                          lx,ly,rx,ry
+                      ));
+
+                      inputText.setText("Analog movement");
+
+                      sendState();
+
+                      return true;
+                  }
+
+                  return super.dispatchGenericMotionEvent(e);
+              }
+
+              void updateController() {
+
+                  for(int id : InputDevice.getDeviceIds()) {
+
+                      InputDevice d = InputDevice.getDevice(id);
+
+                      if(d == null)
+                          continue;
+
+                      int s = d.getSources();
+
+                      if((s & InputDevice.SOURCE_GAMEPAD) != 0 ||
+                         (s & InputDevice.SOURCE_JOYSTICK) != 0) {
+
+                          controllerText.setText(
+                              "🟢 Controller detected\nName: " +
+                              d.getName()
+                          );
+
+                          return;
+                      }
+                  }
+              }
+
+              String getName(int c) {
+
+                  switch(c) {
+
+                      case KeyEvent.KEYCODE_BUTTON_A:
+                          return "A / Cross";
+
+                      case KeyEvent.KEYCODE_BUTTON_B:
+                          return "B / Circle";
+
+                      case KeyEvent.KEYCODE_BUTTON_X:
+                          return "X / Square";
+
+                      case KeyEvent.KEYCODE_BUTTON_Y:
+                          return "Y / Triangle";
+
+                      case KeyEvent.KEYCODE_BUTTON_L1:
+                          return "L1";
+
+                      case KeyEvent.KEYCODE_BUTTON_R1:
+                          return "R1";
+
+                      case KeyEvent.KEYCODE_BUTTON_L2:
+                          return "L2";
+
+                      case KeyEvent.KEYCODE_BUTTON_R2:
+                          return "R2";
+
+                      case KeyEvent.KEYCODE_BUTTON_START:
+                          return "Start";
+
+                      case KeyEvent.KEYCODE_BUTTON_SELECT:
+                          return "Select";
+
+                      case KeyEvent.KEYCODE_DPAD_UP:
+                          return "D-pad UP";
+
+                      case KeyEvent.KEYCODE_DPAD_DOWN:
+                          return "D-pad DOWN";
+
+                      case KeyEvent.KEYCODE_DPAD_LEFT:
+                          return "D-pad LEFT";
+
+                      case KeyEvent.KEYCODE_DPAD_RIGHT:
+                          return "D-pad RIGHT";
+
+                      default:
+                          return "Key " + c;
+                  }
+              }
+          }
+          EOF
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build Android APK
+        run: gradle assembleDebug
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ControllerBridge-V3-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+
+  windows:
+    name: Build Windows V3
+    runs-on: windows-latest
+
+    steps:
+
+      - name: Create receiver
+        shell: pwsh
+        run: |
+          @'
+          using System;
+          using System.Net;
+          using System.Net.Sockets;
+          using System.IO;
+
+          class ControllerBridgeReceiver
+          {
+              static void Main()
+              {
+                  const int PORT = 5555;
+
+                  TcpListener server =
+                      new TcpListener(IPAddress.Any, PORT);
+
+                  server.Start();
+
+                  Console.WriteLine("================================");
+                  Console.WriteLine(" Controller Bridge V3 Receiver");
+                  Console.WriteLine("================================");
+                  Console.WriteLine();
+                  Console.WriteLine("Listening on port 5555...");
+                  Console.WriteLine("Waiting for Android...");
+                  Console.WriteLine();
+
+                  while(true)
+                  {
+                      using(TcpClient client =
+                            server.AcceptTcpClient())
+                      {
+                          Console.WriteLine(
+                              "PHONE CONNECTED: " +
+                              client.Client.RemoteEndPoint
+                          );
+
+                          using(NetworkStream stream =
+                                client.GetStream())
+
+                          using(StreamReader reader =
+                                new StreamReader(stream))
+                          {
+                              string line;
+
+                              while((line =
+                                  reader.ReadLine()) != null)
+                              {
+                                  Console.WriteLine(
+                                      line
+                                  );
+                              }
+                          }
+
+                          Console.WriteLine();
+                          Console.WriteLine(
+                              "PHONE DISCONNECTED"
+                          );
+                          Console.WriteLine();
+                      }
+                  }
+              }
+          }
+          '@ | Out-File Receiver.cs -Encoding utf8
+
+      - name: Build EXE
+        shell: pwsh
+        run: |
+          $csc = Get-ChildItem `
+            "$env:WINDIR\Microsoft.NET\Framework64\v*\csc.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+
+          & $csc.FullName `
+            /nologo `
+            /target:exe `
+            /out:ControllerBridgeReceiverV3.exe `
+            Receiver.cs
+
+      - name: Upload Windows EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: ControllerBridge-V3-Windows
+          path: ControllerBridgeReceiverV3.exe
