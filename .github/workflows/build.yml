@@ -1,4 +1,4 @@
-name: Build Controller Bridge
+name: Build Controller Bridge V2
 
 on:
   workflow_dispatch:
@@ -63,8 +63,8 @@ jobs:
                   applicationId 'com.example.controllerbridge'
                   minSdk 26
                   targetSdk 35
-                  versionCode 1
-                  versionName '1.0'
+                  versionCode 2
+                  versionName '2.0'
               }
 
               compileOptions {
@@ -79,6 +79,8 @@ jobs:
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
 
               <application
                   android:theme="@style/AppTheme"
@@ -103,7 +105,7 @@ jobs:
           </manifest>
           EOF
 
-      - name: Create app theme
+      - name: Create theme
         run: |
           cat > app/src/main/res/values/styles.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
@@ -130,16 +132,36 @@ jobs:
           import android.view.InputDevice;
           import android.view.KeyEvent;
           import android.view.MotionEvent;
+          import android.widget.Button;
+          import android.widget.EditText;
           import android.widget.LinearLayout;
           import android.widget.TextView;
 
+          import java.io.BufferedReader;
+          import java.io.InputStreamReader;
+          import java.io.OutputStream;
+          import java.net.Socket;
           import java.util.Locale;
 
           public class MainActivity extends Activity {
 
               private TextView controllerText;
+              private TextView networkText;
               private TextView inputText;
               private TextView stickText;
+
+              private EditText ipInput;
+              private EditText portInput;
+
+              private Socket socket;
+              private OutputStream output;
+
+              private volatile float lx = 0;
+              private volatile float ly = 0;
+              private volatile float rx = 0;
+              private volatile float ry = 0;
+
+              private volatile int lastKey = 0;
 
               @Override
               protected void onCreate(Bundle savedInstanceState) {
@@ -150,13 +172,18 @@ jobs:
                   layout.setPadding(32, 32, 32, 32);
 
                   controllerText = makeText(
-                          "Controller: checking...",
+                          "🔴 Controller: not detected",
                           20
+                  );
+
+                  networkText = makeText(
+                          "🔴 Windows: disconnected",
+                          18
                   );
 
                   inputText = makeText(
                           "Last input: —",
-                          20
+                          18
                   );
 
                   stickText = makeText(
@@ -165,16 +192,40 @@ jobs:
                           18
                   );
 
-                  TextView info = makeText(
-                          "Controller Bridge v1\n\n" +
-                          "Connect your Bluetooth controller to Android, " +
-                          "then press buttons and move the sticks.",
-                          16
+                  ipInput = new EditText(this);
+                  ipInput.setHint("Windows IP address");
+                  ipInput.setText("192.168.42.1");
+                  ipInput.setSingleLine(true);
+
+                  portInput = new EditText(this);
+                  portInput.setHint("Port");
+                  portInput.setText("5555");
+                  portInput.setInputType(2);
+                  portInput.setSingleLine(true);
+
+                  Button connectButton = new Button(this);
+                  connectButton.setText("CONNECT TO WINDOWS");
+
+                  connectButton.setOnClickListener(
+                          v -> connectToWindows()
                   );
 
                   layout.addView(controllerText);
+                  layout.addView(networkText);
                   layout.addView(inputText);
                   layout.addView(stickText);
+                  layout.addView(ipInput);
+                  layout.addView(portInput);
+                  layout.addView(connectButton);
+
+                  TextView info = makeText(
+                          "USB networking prototype.\n\n" +
+                          "Connect the phone to Windows with USB " +
+                          "and enable USB tethering. Then enter the " +
+                          "Windows IP address and connect.",
+                          15
+                  );
+
                   layout.addView(info);
 
                   setContentView(layout);
@@ -182,81 +233,147 @@ jobs:
                   updateController();
               }
 
-              private TextView makeText(String text, float size) {
+              private TextView makeText(
+                      String text,
+                      float size
+              ) {
                   TextView view = new TextView(this);
                   view.setText(text);
                   view.setTextSize(size);
-                  view.setPadding(0, 16, 0, 16);
+                  view.setPadding(0, 12, 0, 12);
                   return view;
               }
 
-              @Override
-              protected void onResume() {
-                  super.onResume();
-                  updateController();
-              }
+              private void connectToWindows() {
 
-              private void updateController() {
+                  final String ip =
+                          ipInput.getText().toString().trim();
 
-                  InputDevice found = null;
+                  final String portText =
+                          portInput.getText().toString().trim();
 
-                  for (int id : InputDevice.getDeviceIds()) {
+                  final int port;
 
-                      InputDevice device =
-                              InputDevice.getDevice(id);
-
-                      if (device == null) {
-                          continue;
-                      }
-
-                      int sources = device.getSources();
-
-                      boolean gamepad =
-                              (sources & InputDevice.SOURCE_GAMEPAD)
-                                      == InputDevice.SOURCE_GAMEPAD;
-
-                      boolean joystick =
-                              (sources & InputDevice.SOURCE_JOYSTICK)
-                                      == InputDevice.SOURCE_JOYSTICK;
-
-                      if (gamepad || joystick) {
-                          found = device;
-                          break;
-                      }
+                  try {
+                      port = Integer.parseInt(portText);
+                  } catch (Exception e) {
+                      networkText.setText(
+                              "🔴 Invalid port"
+                      );
+                      return;
                   }
 
-                  if (found == null) {
-                      controllerText.setText(
-                              "🔴 Controller: not detected"
+                  networkText.setText(
+                          "🟡 Connecting..."
+                  );
+
+                  new Thread(() -> {
+
+                      try {
+
+                          if (socket != null) {
+                              try {
+                                  socket.close();
+                              } catch (Exception ignored) {
+                              }
+                          }
+
+                          socket = new Socket(ip, port);
+
+                          output =
+                                  socket.getOutputStream();
+
+                          runOnUiThread(() ->
+                                  networkText.setText(
+                                          "🟢 Windows: connected"
+                                  )
+                          );
+
+                          sendControllerData();
+
+                      } catch (Exception e) {
+
+                          runOnUiThread(() ->
+                                  networkText.setText(
+                                          "🔴 Connection failed: " +
+                                          e.getMessage()
+                                  )
+                          );
+                      }
+
+                  }).start();
+              }
+
+              private synchronized void sendLine(
+                      String line
+              ) {
+
+                  try {
+
+                      if (output == null) {
+                          return;
+                      }
+
+                      output.write(
+                              (line + "\n")
+                                      .getBytes()
                       );
-                  } else {
-                      controllerText.setText(
-                              "🟢 Controller detected\n" +
-                              "Name: " + found.getName() + "\n" +
-                              "ID: " + found.getId()
-                      );
+
+                      output.flush();
+
+                  } catch (Exception ignored) {
                   }
               }
 
-              @Override
-              public boolean dispatchKeyEvent(KeyEvent event) {
+              private void sendControllerData() {
 
-                  if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                  sendLine(
+                          String.format(
+                                  Locale.US,
+                                  "LX=%.3f;LY=%.3f;RX=%.3f;RY=%.3f;KEY=%d",
+                                  lx,
+                                  ly,
+                                  rx,
+                                  ry,
+                                  lastKey
+                          )
+                  );
+              }
+
+              @Override
+              public boolean dispatchKeyEvent(
+                      KeyEvent event
+              ) {
+
+                  if (event.getAction() ==
+                          KeyEvent.ACTION_DOWN) {
+
+                      lastKey =
+                              event.getKeyCode();
 
                       inputText.setText(
                               "Button DOWN: " +
-                              getButtonName(event.getKeyCode())
+                              getButtonName(lastKey)
                       );
+
+                      sendControllerData();
 
                       updateController();
                   }
 
-                  if (event.getAction() == KeyEvent.ACTION_UP) {
+                  if (event.getAction() ==
+                          KeyEvent.ACTION_UP) {
+
+                      lastKey = 0;
 
                       inputText.setText(
                               "Button UP: " +
-                              getButtonName(event.getKeyCode())
+                              getButtonName(
+                                      event.getKeyCode()
+                              )
                       );
+
+                      sendControllerData();
                   }
 
                   return super.dispatchKeyEvent(event);
@@ -264,31 +381,35 @@ jobs:
 
               @Override
               public boolean dispatchGenericMotionEvent(
-                      MotionEvent event) {
+                      MotionEvent event
+              ) {
 
                   if (event.getAction() ==
                           MotionEvent.ACTION_MOVE) {
 
-                      int source = event.getSource();
+                      if ((event.getSource() &
+                              InputDevice.SOURCE_CLASS_JOYSTICK)
+                              != 0) {
 
-                      if ((source &
-                              InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {
-
-                          float lx =
+                          lx =
                                   event.getAxisValue(
-                                          MotionEvent.AXIS_X);
+                                          MotionEvent.AXIS_X
+                                  );
 
-                          float ly =
+                          ly =
                                   event.getAxisValue(
-                                          MotionEvent.AXIS_Y);
+                                          MotionEvent.AXIS_Y
+                                  );
 
-                          float rx =
+                          rx =
                                   event.getAxisValue(
-                                          MotionEvent.AXIS_Z);
+                                          MotionEvent.AXIS_Z
+                                  );
 
-                          float ry =
+                          ry =
                                   event.getAxisValue(
-                                          MotionEvent.AXIS_RZ);
+                                          MotionEvent.AXIS_RZ
+                                  );
 
                           stickText.setText(
                                   String.format(
@@ -303,17 +424,72 @@ jobs:
                           );
 
                           inputText.setText(
-                                  "Analog stick movement"
+                                  "Analog movement"
                           );
+
+                          sendControllerData();
 
                           return true;
                       }
                   }
 
-                  return super.dispatchGenericMotionEvent(event);
+                  return super.dispatchGenericMotionEvent(
+                          event
+                  );
               }
 
-              private String getButtonName(int code) {
+              private void updateController() {
+
+                  InputDevice found = null;
+
+                  for (int id :
+                          InputDevice.getDeviceIds()) {
+
+                      InputDevice device =
+                              InputDevice.getDevice(id);
+
+                      if (device == null) {
+                          continue;
+                      }
+
+                      int sources =
+                              device.getSources();
+
+                      boolean gamepad =
+                              (sources &
+                                      InputDevice.SOURCE_GAMEPAD)
+                                      == InputDevice.SOURCE_GAMEPAD;
+
+                      boolean joystick =
+                              (sources &
+                                      InputDevice.SOURCE_JOYSTICK)
+                                      == InputDevice.SOURCE_JOYSTICK;
+
+                      if (gamepad || joystick) {
+                          found = device;
+                          break;
+                      }
+                  }
+
+                  if (found == null) {
+
+                      controllerText.setText(
+                              "🔴 Controller: not detected"
+                      );
+
+                  } else {
+
+                      controllerText.setText(
+                              "🟢 Controller detected\n" +
+                              "Name: " +
+                              found.getName()
+                      );
+                  }
+              }
+
+              private String getButtonName(
+                      int code
+              ) {
 
                   switch (code) {
 
@@ -341,12 +517,6 @@ jobs:
                       case KeyEvent.KEYCODE_BUTTON_R2:
                           return "R2";
 
-                      case KeyEvent.KEYCODE_BUTTON_THUMBL:
-                          return "Left stick";
-
-                      case KeyEvent.KEYCODE_BUTTON_THUMBR:
-                          return "Right stick";
-
                       case KeyEvent.KEYCODE_BUTTON_START:
                           return "Start";
 
@@ -366,7 +536,7 @@ jobs:
                           return "D-pad RIGHT";
 
                       default:
-                          return "Key code " + code;
+                          return "Key " + code;
                   }
               }
           }
@@ -389,5 +559,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ControllerBridge-APK
+          name: ControllerBridge-V2-APK
           path: app/build/outputs/apk/debug/app-debug.apk
