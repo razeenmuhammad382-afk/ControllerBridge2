@@ -1,0 +1,109 @@
+name: Build Windows Controller Receiver
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+
+      - name: Create receiver source
+        shell: pwsh
+        run: |
+          @'
+          using System;
+          using System.Net;
+          using System.Net.Sockets;
+          using System.IO;
+
+          class ControllerBridgeReceiver
+          {
+              static void Main()
+              {
+                  const int port = 5555;
+
+                  Console.Title = "Controller Bridge Receiver";
+
+                  Console.WriteLine("======================================");
+                  Console.WriteLine("   Controller Bridge - Windows");
+                  Console.WriteLine("======================================");
+                  Console.WriteLine();
+                  Console.WriteLine("Listening on TCP port 5555...");
+                  Console.WriteLine("Waiting for Android phone...");
+                  Console.WriteLine();
+
+                  TcpListener listener =
+                      new TcpListener(IPAddress.Any, port);
+
+                  listener.Start();
+
+                  try
+                  {
+                      while (true)
+                      {
+                          using (TcpClient client =
+                                 listener.AcceptTcpClient())
+                          {
+                              Console.WriteLine(
+                                  "Phone connected: " +
+                                  client.Client.RemoteEndPoint);
+
+                              Console.WriteLine();
+
+                              using (NetworkStream stream =
+                                     client.GetStream())
+                              using (StreamReader reader =
+                                     new StreamReader(stream))
+                              {
+                                  string line;
+
+                                  while ((line =
+                                      reader.ReadLine()) != null)
+                                  {
+                                      Console.WriteLine(line);
+                                  }
+                              }
+
+                              Console.WriteLine();
+                              Console.WriteLine(
+                                  "Phone disconnected.");
+
+                              Console.WriteLine(
+                                  "Waiting for another connection...");
+
+                              Console.WriteLine();
+                          }
+                      }
+                  }
+                  finally
+                  {
+                      listener.Stop();
+                  }
+              }
+          }
+          '@ | Out-File -FilePath ControllerBridgeReceiver.cs -Encoding utf8
+
+      - name: Build EXE
+        shell: pwsh
+        run: |
+          $csc = Get-ChildItem `
+            "$env:WINDIR\Microsoft.NET\Framework64\v*\csc.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+
+          & $csc.FullName `
+            /nologo `
+            /target:exe `
+            /out:ControllerBridgeReceiver.exe `
+            ControllerBridgeReceiver.cs
+
+      - name: Upload Windows EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: ControllerBridge-Windows-EXE
+          path: ControllerBridgeReceiver.exe
