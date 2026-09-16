@@ -1,0 +1,393 @@
+name: Build Controller Bridge
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Create project folders
+        run: |
+          mkdir -p app/src/main/java/com/example/controllerbridge
+          mkdir -p app/src/main/res/values
+
+      - name: Create settings.gradle
+        run: |
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "ControllerBridge"
+          include ":app"
+          EOF
+
+      - name: Create root build.gradle
+        run: |
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+      - name: Create app build.gradle
+        run: |
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.example.controllerbridge'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.example.controllerbridge'
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+      - name: Create AndroidManifest
+        run: |
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <application
+                  android:theme="@style/AppTheme"
+                  android:label="Controller Bridge"
+                  android:allowBackup="false"
+                  android:supportsRtl="true">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:screenOrientation="portrait"
+                      android:exported="true">
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+
+                  </activity>
+
+              </application>
+
+          </manifest>
+          EOF
+
+      - name: Create app theme
+        run: |
+          cat > app/src/main/res/values/styles.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+
+              <style name="AppTheme"
+                  parent="android:style/Theme.Material.Light.NoActionBar">
+
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:colorAccent">#3F51B5</item>
+
+              </style>
+
+          </resources>
+          EOF
+
+      - name: Create MainActivity
+        run: |
+          cat > app/src/main/java/com/example/controllerbridge/MainActivity.java <<'EOF'
+          package com.example.controllerbridge;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.view.InputDevice;
+          import android.view.KeyEvent;
+          import android.view.MotionEvent;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          import java.util.Locale;
+
+          public class MainActivity extends Activity {
+
+              private TextView controllerText;
+              private TextView inputText;
+              private TextView stickText;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  LinearLayout layout = new LinearLayout(this);
+                  layout.setOrientation(LinearLayout.VERTICAL);
+                  layout.setPadding(32, 32, 32, 32);
+
+                  controllerText = makeText(
+                          "Controller: checking...",
+                          20
+                  );
+
+                  inputText = makeText(
+                          "Last input: —",
+                          20
+                  );
+
+                  stickText = makeText(
+                          "Left stick:  X 0.00  Y 0.00\n" +
+                          "Right stick: X 0.00  Y 0.00",
+                          18
+                  );
+
+                  TextView info = makeText(
+                          "Controller Bridge v1\n\n" +
+                          "Connect your Bluetooth controller to Android, " +
+                          "then press buttons and move the sticks.",
+                          16
+                  );
+
+                  layout.addView(controllerText);
+                  layout.addView(inputText);
+                  layout.addView(stickText);
+                  layout.addView(info);
+
+                  setContentView(layout);
+
+                  updateController();
+              }
+
+              private TextView makeText(String text, float size) {
+                  TextView view = new TextView(this);
+                  view.setText(text);
+                  view.setTextSize(size);
+                  view.setPadding(0, 16, 0, 16);
+                  return view;
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  updateController();
+              }
+
+              private void updateController() {
+
+                  InputDevice found = null;
+
+                  for (int id : InputDevice.getDeviceIds()) {
+
+                      InputDevice device =
+                              InputDevice.getDevice(id);
+
+                      if (device == null) {
+                          continue;
+                      }
+
+                      int sources = device.getSources();
+
+                      boolean gamepad =
+                              (sources & InputDevice.SOURCE_GAMEPAD)
+                                      == InputDevice.SOURCE_GAMEPAD;
+
+                      boolean joystick =
+                              (sources & InputDevice.SOURCE_JOYSTICK)
+                                      == InputDevice.SOURCE_JOYSTICK;
+
+                      if (gamepad || joystick) {
+                          found = device;
+                          break;
+                      }
+                  }
+
+                  if (found == null) {
+                      controllerText.setText(
+                              "🔴 Controller: not detected"
+                      );
+                  } else {
+                      controllerText.setText(
+                              "🟢 Controller detected\n" +
+                              "Name: " + found.getName() + "\n" +
+                              "ID: " + found.getId()
+                      );
+                  }
+              }
+
+              @Override
+              public boolean dispatchKeyEvent(KeyEvent event) {
+
+                  if (event.getAction() == KeyEvent.ACTION_DOWN) {
+
+                      inputText.setText(
+                              "Button DOWN: " +
+                              getButtonName(event.getKeyCode())
+                      );
+
+                      updateController();
+                  }
+
+                  if (event.getAction() == KeyEvent.ACTION_UP) {
+
+                      inputText.setText(
+                              "Button UP: " +
+                              getButtonName(event.getKeyCode())
+                      );
+                  }
+
+                  return super.dispatchKeyEvent(event);
+              }
+
+              @Override
+              public boolean dispatchGenericMotionEvent(
+                      MotionEvent event) {
+
+                  if (event.getAction() ==
+                          MotionEvent.ACTION_MOVE) {
+
+                      int source = event.getSource();
+
+                      if ((source &
+                              InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {
+
+                          float lx =
+                                  event.getAxisValue(
+                                          MotionEvent.AXIS_X);
+
+                          float ly =
+                                  event.getAxisValue(
+                                          MotionEvent.AXIS_Y);
+
+                          float rx =
+                                  event.getAxisValue(
+                                          MotionEvent.AXIS_Z);
+
+                          float ry =
+                                  event.getAxisValue(
+                                          MotionEvent.AXIS_RZ);
+
+                          stickText.setText(
+                                  String.format(
+                                          Locale.US,
+                                          "Left stick:  X %+.2f  Y %+.2f\n" +
+                                          "Right stick: X %+.2f  Y %+.2f",
+                                          lx,
+                                          ly,
+                                          rx,
+                                          ry
+                                  )
+                          );
+
+                          inputText.setText(
+                                  "Analog stick movement"
+                          );
+
+                          return true;
+                      }
+                  }
+
+                  return super.dispatchGenericMotionEvent(event);
+              }
+
+              private String getButtonName(int code) {
+
+                  switch (code) {
+
+                      case KeyEvent.KEYCODE_BUTTON_A:
+                          return "A / Cross";
+
+                      case KeyEvent.KEYCODE_BUTTON_B:
+                          return "B / Circle";
+
+                      case KeyEvent.KEYCODE_BUTTON_X:
+                          return "X / Square";
+
+                      case KeyEvent.KEYCODE_BUTTON_Y:
+                          return "Y / Triangle";
+
+                      case KeyEvent.KEYCODE_BUTTON_L1:
+                          return "L1";
+
+                      case KeyEvent.KEYCODE_BUTTON_R1:
+                          return "R1";
+
+                      case KeyEvent.KEYCODE_BUTTON_L2:
+                          return "L2";
+
+                      case KeyEvent.KEYCODE_BUTTON_R2:
+                          return "R2";
+
+                      case KeyEvent.KEYCODE_BUTTON_THUMBL:
+                          return "Left stick";
+
+                      case KeyEvent.KEYCODE_BUTTON_THUMBR:
+                          return "Right stick";
+
+                      case KeyEvent.KEYCODE_BUTTON_START:
+                          return "Start";
+
+                      case KeyEvent.KEYCODE_BUTTON_SELECT:
+                          return "Select";
+
+                      case KeyEvent.KEYCODE_DPAD_UP:
+                          return "D-pad UP";
+
+                      case KeyEvent.KEYCODE_DPAD_DOWN:
+                          return "D-pad DOWN";
+
+                      case KeyEvent.KEYCODE_DPAD_LEFT:
+                          return "D-pad LEFT";
+
+                      case KeyEvent.KEYCODE_DPAD_RIGHT:
+                          return "D-pad RIGHT";
+
+                      default:
+                          return "Key code " + code;
+                  }
+              }
+          }
+          EOF
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build APK
+        run: gradle assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ControllerBridge-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
