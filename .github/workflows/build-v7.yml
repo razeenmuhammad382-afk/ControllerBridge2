@@ -1,0 +1,848 @@
+name: Build Controller Bridge V7
+
+on:
+  workflow_dispatch:
+
+jobs:
+  android:
+    name: Build Android V7
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/java/com/example/controllerbridge
+          mkdir -p app/src/main/res/values
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "ControllerBridgeV7"
+          include(":app")
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.example.controllerbridge'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.example.controllerbridge'
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 7
+                  versionName '7.0'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          cat > app/src/main/res/values/styles.xml <<'EOF'
+          <resources>
+              <style name="AppTheme"
+                  parent="android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:colorAccent">#3F51B5</item>
+                  <item name="android:windowLightStatusBar">true</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <application
+                  android:theme="@style/AppTheme"
+                  android:label="Controller Bridge V7"
+                  android:allowBackup="false"
+                  android:supportsRtl="true">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:screenOrientation="portrait"
+                      android:exported="true">
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/example/controllerbridge/MainActivity.java <<'EOF'
+          package com.example.controllerbridge;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.text.InputType;
+          import android.view.InputDevice;
+          import android.view.KeyEvent;
+          import android.view.MotionEvent;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          import java.io.BufferedWriter;
+          import java.io.OutputStreamWriter;
+          import java.net.InetSocketAddress;
+          import java.net.Socket;
+          import java.nio.charset.StandardCharsets;
+          import java.util.Locale;
+
+          public class MainActivity extends Activity {
+              private final Handler ui = new Handler(Looper.getMainLooper());
+
+              private TextView controllerStatus;
+              private TextView pcStatus;
+              private TextView stateView;
+              private TextView packetView;
+              private TextView eventView;
+              private EditText ipInput;
+              private EditText portInput;
+              private Button connectButton;
+
+              private volatile Socket socket;
+              private volatile BufferedWriter writer;
+              private volatile boolean connected;
+              private volatile long packetsSent;
+
+              private volatile float lx, ly, rx, ry, lt, rt;
+              private volatile int buttons;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(24, 20, 24, 20);
+
+                  controllerStatus = label("🔴 Controller: NOT DETECTED", 20);
+                  pcStatus = label("🔴 PC: DISCONNECTED", 20);
+                  stateView = label(stateText(), 17);
+                  packetView = label("Packets sent: 0", 17);
+                  eventView = label("Last input: —", 17);
+
+                  ipInput = new EditText(this);
+                  ipInput.setSingleLine(true);
+                  ipInput.setHint("Windows IPv4 address");
+                  ipInput.setInputType(InputType.TYPE_CLASS_PHONE);
+
+                  portInput = new EditText(this);
+                  portInput.setSingleLine(true);
+                  portInput.setText("5555");
+                  portInput.setHint("TCP port");
+                  portInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+
+                  connectButton = new Button(this);
+                  connectButton.setText("CONNECT TO WINDOWS");
+                  connectButton.setOnClickListener(v -> toggleConnection());
+
+                  root.addView(controllerStatus);
+                  root.addView(pcStatus);
+                  root.addView(stateView);
+                  root.addView(packetView);
+                  root.addView(eventView);
+                  root.addView(ipInput);
+                  root.addView(portInput);
+                  root.addView(connectButton);
+
+                  TextView help = label(
+                      "USB tethering: enter the PC IPv4 shown by the Windows V7 EXE, then connect.",
+                      14
+                  );
+                  root.addView(help);
+
+                  setContentView(root);
+                  refreshController();
+              }
+
+              private TextView label(String text, int size) {
+                  TextView v = new TextView(this);
+                  v.setText(text);
+                  v.setTextSize(size);
+                  v.setPadding(0, 7, 0, 7);
+                  return v;
+              }
+
+              private String stateText() {
+                  return String.format(
+                      Locale.US,
+                      "LX %+.3f   LY %+.3f\\nRX %+.3f   RY %+.3f\\nLT %.3f   RT %.3f\\nButtons 0x%04X",
+                      lx, ly, rx, ry, lt, rt, buttons
+                  );
+              }
+
+              private void toggleConnection() {
+                  if (connected) {
+                      disconnect();
+                      pcStatus.setText("🔴 PC: DISCONNECTED");
+                      connectButton.setText("CONNECT TO WINDOWS");
+                  } else {
+                      connectToWindows();
+                  }
+              }
+
+              private void connectToWindows() {
+                  final String ip = ipInput.getText().toString().trim();
+                  final int port;
+
+                  try {
+                      port = Integer.parseInt(portInput.getText().toString().trim());
+                      if (port < 1 || port > 65535) throw new NumberFormatException();
+                  } catch (Exception e) {
+                      pcStatus.setText("🔴 PC: INVALID PORT");
+                      return;
+                  }
+
+                  if (ip.isEmpty()) {
+                      pcStatus.setText("🔴 PC: ENTER IPv4");
+                      return;
+                  }
+
+                  disconnect();
+                  pcStatus.setText("🟡 PC: CONNECTING...");
+                  connectButton.setEnabled(false);
+
+                  new Thread(() -> {
+                      Socket s = null;
+                      try {
+                          s = new Socket();
+                          s.setTcpNoDelay(true);
+                          s.setKeepAlive(true);
+                          s.connect(new InetSocketAddress(ip, port), 5000);
+
+                          BufferedWriter w = new BufferedWriter(
+                              new OutputStreamWriter(
+                                  s.getOutputStream(),
+                                  StandardCharsets.UTF_8
+                              )
+                          );
+
+                          socket = s;
+                          writer = w;
+                          connected = true;
+                          packetsSent = 0;
+
+                          runUi(() -> {
+                              pcStatus.setText("🟢 PC: CONNECTED");
+                              connectButton.setText("DISCONNECT");
+                              connectButton.setEnabled(true);
+                          });
+
+                          sendState();
+
+                          while (connected && socket == s && !s.isClosed()) {
+                              Thread.sleep(25);
+                              sendState();
+                          }
+                      } catch (Exception e) {
+                          connected = false;
+                          final String type = e.getClass().getSimpleName();
+                          runUi(() -> pcStatus.setText("🔴 PC: CONNECTION ERROR (" + type + ")"));
+                      } finally {
+                          if (s != null) {
+                              try { s.close(); } catch (Exception ignored) {}
+                          }
+                          if (socket == s) disconnect();
+                          runUi(() -> connectButton.setEnabled(true));
+                      }
+                  }, "ControllerBridge-Network").start();
+              }
+
+              private synchronized void sendState() {
+                  if (!connected || writer == null) return;
+
+                  try {
+                      String line = String.format(
+                          Locale.US,
+                          "V7|LX=%.6f|LY=%.6f|RX=%.6f|RY=%.6f|LT=%.6f|RT=%.6f|BTN=%d|COUNT=%d",
+                          lx, ly, rx, ry, lt, rt, buttons, packetsSent + 1
+                      );
+                      writer.write(line);
+                      writer.newLine();
+                      writer.flush();
+
+                      packetsSent++;
+                      final long count = packetsSent;
+                      runUi(() -> {
+                          packetView.setText("Packets sent: " + count);
+                          stateView.setText(stateText());
+                      });
+                  } catch (Exception e) {
+                      connected = false;
+                      runUi(() -> pcStatus.setText("🔴 PC: SEND ERROR"));
+                  }
+              }
+
+              @Override
+              public boolean dispatchKeyEvent(KeyEvent event) {
+                  InputDevice d = InputDevice.getDevice(event.getDeviceId());
+
+                  if (d != null) {
+                      int sources = d.getSources();
+                      boolean controller =
+                          (sources & InputDevice.SOURCE_GAMEPAD) != 0 ||
+                          (sources & InputDevice.SOURCE_JOYSTICK) != 0;
+
+                      if (controller) {
+                          if (event.getAction() == KeyEvent.ACTION_DOWN &&
+                              event.getRepeatCount() == 0) {
+                              setButton(event.getKeyCode(), true);
+                              return true;
+                          }
+
+                          if (event.getAction() == KeyEvent.ACTION_UP) {
+                              setButton(event.getKeyCode(), false);
+                              return true;
+                          }
+                      }
+                  }
+
+                  return super.dispatchKeyEvent(event);
+              }
+
+              private void setButton(int code, boolean down) {
+                  int mask = buttonMask(code);
+
+                  if (mask == 0) {
+                      runUi(() -> eventView.setText(
+                          "Last input: key " + code + (down ? " DOWN" : " UP")
+                      ));
+                      return;
+                  }
+
+                  if (down) {
+                      buttons |= mask;
+                  } else {
+                      buttons &= ~mask;
+                  }
+
+                  final String name = buttonName(code);
+                  runUi(() -> {
+                      eventView.setText(
+                          "Last input: " + name + (down ? " DOWN" : " UP")
+                      );
+                      stateView.setText(stateText());
+                  });
+
+                  sendState();
+              }
+
+              private int buttonMask(int code) {
+                  switch (code) {
+                      case KeyEvent.KEYCODE_DPAD_UP: return 0x0001;
+                      case KeyEvent.KEYCODE_DPAD_DOWN: return 0x0002;
+                      case KeyEvent.KEYCODE_DPAD_LEFT: return 0x0004;
+                      case KeyEvent.KEYCODE_DPAD_RIGHT: return 0x0008;
+                      case KeyEvent.KEYCODE_BUTTON_START: return 0x0010;
+                      case KeyEvent.KEYCODE_BUTTON_SELECT: return 0x0020;
+                      case KeyEvent.KEYCODE_BUTTON_THUMBL: return 0x0040;
+                      case KeyEvent.KEYCODE_BUTTON_THUMBR: return 0x0080;
+                      case KeyEvent.KEYCODE_BUTTON_L1: return 0x0100;
+                      case KeyEvent.KEYCODE_BUTTON_R1: return 0x0200;
+                      case KeyEvent.KEYCODE_BUTTON_A: return 0x1000;
+                      case KeyEvent.KEYCODE_BUTTON_B: return 0x2000;
+                      case KeyEvent.KEYCODE_BUTTON_X: return 0x4000;
+                      case KeyEvent.KEYCODE_BUTTON_Y: return 0x8000;
+                      default: return 0;
+                  }
+              }
+
+              private String buttonName(int code) {
+                  switch (code) {
+                      case KeyEvent.KEYCODE_BUTTON_A: return "A";
+                      case KeyEvent.KEYCODE_BUTTON_B: return "B";
+                      case KeyEvent.KEYCODE_BUTTON_X: return "X";
+                      case KeyEvent.KEYCODE_BUTTON_Y: return "Y";
+                      case KeyEvent.KEYCODE_BUTTON_L1: return "L1";
+                      case KeyEvent.KEYCODE_BUTTON_R1: return "R1";
+                      case KeyEvent.KEYCODE_BUTTON_THUMBL: return "L3";
+                      case KeyEvent.KEYCODE_BUTTON_THUMBR: return "R3";
+                      case KeyEvent.KEYCODE_BUTTON_START: return "START";
+                      case KeyEvent.KEYCODE_BUTTON_SELECT: return "BACK/SELECT";
+                      case KeyEvent.KEYCODE_DPAD_UP: return "DPAD UP";
+                      case KeyEvent.KEYCODE_DPAD_DOWN: return "DPAD DOWN";
+                      case KeyEvent.KEYCODE_DPAD_LEFT: return "DPAD LEFT";
+                      case KeyEvent.KEYCODE_DPAD_RIGHT: return "DPAD RIGHT";
+                      default: return "KEY " + code;
+                  }
+              }
+
+              @Override
+              public boolean dispatchGenericMotionEvent(MotionEvent event) {
+                  if (event.getAction() == MotionEvent.ACTION_MOVE &&
+                      (event.getSource() & InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {
+
+                      lx = clamp(event.getAxisValue(MotionEvent.AXIS_X), -1f, 1f);
+                      ly = clamp(event.getAxisValue(MotionEvent.AXIS_Y), -1f, 1f);
+                      rx = clamp(event.getAxisValue(MotionEvent.AXIS_Z), -1f, 1f);
+                      ry = clamp(event.getAxisValue(MotionEvent.AXIS_RZ), -1f, 1f);
+                      lt = clamp(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), 0f, 1f);
+                      rt = clamp(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), 0f, 1f);
+
+                      // Hat axes are converted into the same XInput D-pad bits.
+                      float hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X);
+                      float hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y);
+
+                      buttons &= ~0x000F;
+                      if (hatY < -0.5f) buttons |= 0x0001;
+                      if (hatY > 0.5f) buttons |= 0x0002;
+                      if (hatX < -0.5f) buttons |= 0x0004;
+                      if (hatX > 0.5f) buttons |= 0x0008;
+
+                      runUi(() -> {
+                          stateView.setText(stateText());
+                          eventView.setText("Last input: ANALOG MOVEMENT");
+                      });
+
+                      sendState();
+                      return true;
+                  }
+
+                  return super.dispatchGenericMotionEvent(event);
+              }
+
+              private float clamp(float v, float min, float max) {
+                  return Math.max(min, Math.min(max, v));
+              }
+
+              private void refreshController() {
+                  InputDevice found = null;
+
+                  for (int id : InputDevice.getDeviceIds()) {
+                      InputDevice d = InputDevice.getDevice(id);
+                      if (d == null) continue;
+
+                      int s = d.getSources();
+                      if ((s & InputDevice.SOURCE_GAMEPAD) != 0 ||
+                          (s & InputDevice.SOURCE_JOYSTICK) != 0) {
+                          found = d;
+                          break;
+                      }
+                  }
+
+                  if (found == null) {
+                      controllerStatus.setText("🔴 Controller: NOT DETECTED");
+                  } else {
+                      controllerStatus.setText(
+                          "🟢 Controller: CONNECTED\\nName: " + found.getName()
+                      );
+                  }
+
+                  ui.postDelayed(this::refreshController, 1000);
+              }
+
+              private void runUi(Runnable r) {
+                  ui.post(r);
+              }
+
+              private synchronized void disconnect() {
+                  connected = false;
+
+                  try {
+                      if (writer != null) writer.close();
+                  } catch (Exception ignored) {}
+
+                  try {
+                      if (socket != null) socket.close();
+                  } catch (Exception ignored) {}
+
+                  writer = null;
+                  socket = null;
+              }
+
+              @Override
+              protected void onDestroy() {
+                  disconnect();
+                  super.onDestroy();
+              }
+          }
+          EOF
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build Android V7 APK
+        run: gradle assembleDebug
+
+      - name: Upload Android V7 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ControllerBridge-V7-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+  windows:
+    name: Build Windows V7
+    runs-on: windows-latest
+
+    steps:
+      - name: Create Windows project
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path win | Out-Null
+
+          @'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <OutputType>Exe</OutputType>
+              <TargetFramework>net8.0-windows</TargetFramework>
+              <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+              <SelfContained>true</SelfContained>
+              <PublishSingleFile>true</PublishSingleFile>
+              <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+              <ImplicitUsings>enable</ImplicitUsings>
+              <Nullable>enable</Nullable>
+            </PropertyGroup>
+
+            <ItemGroup>
+              <PackageReference Include="Nefarius.ViGEm.Client" Version="1.21.256" />
+            </ItemGroup>
+          </Project>
+          '@ | Set-Content win/ControllerBridgeV7.csproj -Encoding UTF8
+
+          @'
+          using System;
+          using System.Globalization;
+          using System.IO;
+          using System.Linq;
+          using System.Net;
+          using System.Net.NetworkInformation;
+          using System.Net.Sockets;
+          using Nefarius.ViGEm.Client;
+          using Nefarius.ViGEm.Client.Targets;
+
+          internal class Program
+          {
+              private const int Port = 5555;
+
+              private readonly record struct State(
+                  float LX,
+                  float LY,
+                  float RX,
+                  float RY,
+                  float LT,
+                  float RT,
+                  ushort Buttons
+              );
+
+              private static void Main()
+              {
+                  Console.Title = "Controller Bridge V7";
+
+                  Console.WriteLine("==================================================");
+                  Console.WriteLine(" Controller Bridge V7 - Windows Receiver");
+                  Console.WriteLine("==================================================");
+                  Console.WriteLine();
+
+                  try
+                  {
+                      using var vigem = new ViGEmClient();
+                      var pad = vigem.CreateXbox360Controller();
+                      pad.Connect();
+
+                      Console.WriteLine("Virtual Xbox 360 controller: READY");
+                      Console.WriteLine();
+
+                      PrintIPv4();
+                      Console.WriteLine();
+                      Console.WriteLine($"TCP port: {Port}");
+                      Console.WriteLine("Waiting for Android phone...");
+                      Console.WriteLine();
+
+                      var listener = new TcpListener(IPAddress.Any, Port);
+                      listener.Start();
+
+                      while (true)
+                      {
+                          using var client = listener.AcceptTcpClient();
+                          client.NoDelay = true;
+
+                          Console.WriteLine(
+                              $"PHONE CONNECTED: {client.Client.RemoteEndPoint}"
+                          );
+
+                          long received = 0;
+                          long accepted = 0;
+
+                          try
+                          {
+                              using var reader = new StreamReader(
+                                  client.GetStream(),
+                                  System.Text.Encoding.UTF8,
+                                  false,
+                                  4096,
+                                  leaveOpen: false
+                              );
+
+                              string? line;
+                              while ((line = reader.ReadLine()) != null)
+                              {
+                                  received++;
+
+                                  if (!TryParse(line, out var state))
+                                  {
+                                      Console.WriteLine(
+                                          $"PARSE ERROR #{received}: {line}"
+                                      );
+                                      continue;
+                                  }
+
+                                  accepted++;
+                                  ApplyState(pad, state);
+
+                                  // Keep the console readable while still proving packets arrive.
+                                  if (accepted == 1 || accepted % 10 == 0)
+                                  {
+                                      Console.WriteLine(
+                                          $"RX {accepted}  " +
+                                          $"LX={state.LX:+0.000;-0.000;0.000} " +
+                                          $"LY={state.LY:+0.000;-0.000;0.000} " +
+                                          $"RX={state.RX:+0.000;-0.000;0.000} " +
+                                          $"RY={state.RY:+0.000;-0.000;0.000} " +
+                                          $"LT={state.LT:0.000} " +
+                                          $"RT={state.RT:0.000} " +
+                                          $"BTN=0x{state.Buttons:X4}"
+                                      );
+                                  }
+                              }
+                          }
+                          catch (Exception ex)
+                          {
+                              Console.WriteLine($"CONNECTION ERROR: {ex.Message}");
+                          }
+
+                          Console.WriteLine(
+                              $"PHONE DISCONNECTED | received={received} accepted={accepted}"
+                          );
+                          Console.WriteLine("Waiting for Android phone...");
+                          Console.WriteLine();
+                      }
+                  }
+                  catch (Exception ex)
+                  {
+                      Console.WriteLine();
+                      Console.WriteLine("FATAL ERROR:");
+                      Console.WriteLine(ex.ToString());
+                      Console.WriteLine();
+                      Console.WriteLine("Press ENTER to close.");
+                      Console.ReadLine();
+                  }
+              }
+
+              private static void PrintIPv4()
+              {
+                  Console.WriteLine("CURRENT PC IPv4 ADDRESSES:");
+
+                  foreach (var ni in NetworkInterface.GetAllNetworkInterfaces()
+                      .Where(n => n.OperationalStatus == OperationalStatus.Up))
+                  {
+                      foreach (var ua in ni.GetIPProperties().UnicastAddresses)
+                      {
+                          var ip = ua.Address;
+
+                          if (ip.AddressFamily != AddressFamily.InterNetwork)
+                              continue;
+
+                          if (IPAddress.IsLoopback(ip))
+                              continue;
+
+                          if (ip.ToString().StartsWith("169.254.", StringComparison.Ordinal))
+                              continue;
+
+                          Console.WriteLine($"  {ip,-15}  [{ni.Name}]");
+                      }
+                  }
+              }
+
+              private static bool TryParse(string line, out State state)
+              {
+                  state = default;
+
+                  if (!line.StartsWith("V7|", StringComparison.Ordinal))
+                      return false;
+
+                  float lx = 0, ly = 0, rx = 0, ry = 0, lt = 0, rt = 0;
+                  ushort buttons = 0;
+
+                  try
+                  {
+                      foreach (var item in line.Split('|').Skip(1))
+                      {
+                          var kv = item.Split('=', 2);
+                          if (kv.Length != 2)
+                              continue;
+
+                          switch (kv[0])
+                          {
+                              case "LX": lx = ParseFloat(kv[1]); break;
+                              case "LY": ly = ParseFloat(kv[1]); break;
+                              case "RX": rx = ParseFloat(kv[1]); break;
+                              case "RY": ry = ParseFloat(kv[1]); break;
+                              case "LT": lt = ParseFloat(kv[1]); break;
+                              case "RT": rt = ParseFloat(kv[1]); break;
+                              case "BTN":
+                                  buttons = ushort.Parse(
+                                      kv[1],
+                                      NumberStyles.Integer,
+                                      CultureInfo.InvariantCulture
+                                  );
+                                  break;
+                          }
+                      }
+
+                      state = new State(
+                          Clamp(lx, -1f, 1f),
+                          Clamp(ly, -1f, 1f),
+                          Clamp(rx, -1f, 1f),
+                          Clamp(ry, -1f, 1f),
+                          Clamp(lt, 0f, 1f),
+                          Clamp(rt, 0f, 1f),
+                          buttons
+                      );
+
+                      return true;
+                  }
+                  catch
+                  {
+                      return false;
+                  }
+              }
+
+              private static float ParseFloat(string value) =>
+                  float.Parse(
+                      value,
+                      NumberStyles.Float,
+                      CultureInfo.InvariantCulture
+                  );
+
+              private static float Clamp(float value, float min, float max) =>
+                  Math.Clamp(value, min, max);
+
+              private static void ApplyState(
+                  Nefarius.ViGEm.Client.Targets.IXbox360Controller pad,
+                  State state
+              )
+              {
+                  pad.LeftThumbX = ToShort(state.LX);
+                  pad.LeftThumbY = ToShort(state.LY);
+                  pad.RightThumbX = ToShort(state.RX);
+                  pad.RightThumbY = ToShort(state.RY);
+                  pad.LeftTrigger = ToByte(state.LT);
+                  pad.RightTrigger = ToByte(state.RT);
+                  pad.SetButtonsFull(state.Buttons);
+                  pad.SubmitReport();
+              }
+
+              private static short ToShort(float value)
+              {
+                  value = Clamp(value, -1f, 1f);
+
+                  if (value <= -1f) return short.MinValue;
+                  if (value >= 1f) return short.MaxValue;
+
+                  return (short)Math.Round(value * 32767f);
+              }
+
+              private static byte ToByte(float value)
+              {
+                  value = Clamp(value, 0f, 1f);
+                  return (byte)Math.Round(value * 255f);
+              }
+          }
+          '@ | Set-Content win/Program.cs -Encoding UTF8
+
+          @'
+          @echo off
+          echo Adding Controller Bridge V7 TCP 5555 firewall rule...
+          netsh advfirewall firewall delete rule name="Controller Bridge V7 TCP 5555" >nul 2>&1
+          netsh advfirewall firewall add rule name="Controller Bridge V7 TCP 5555" dir=in action=allow protocol=TCP localport=5555 profile=any
+          echo.
+          echo Firewall rule installed.
+          echo If Windows asks for administrator permission, choose Yes.
+          pause
+          '@ | Set-Content Setup-Firewall.cmd -Encoding ASCII
+
+          @'
+          Controller Bridge V7
+
+          1. Install the Nefarius Virtual Gamepad Emulation Bus driver on Windows.
+          2. Run Setup-Firewall.cmd once as administrator.
+          3. Run ControllerBridgeV7.exe.
+          4. The EXE prints the current IPv4 addresses.
+          5. Enable USB tethering and enter the IPv4 belonging to the USB-tethering adapter in the Android V7 app.
+          6. Android should show PC: CONNECTED.
+          7. Windows should show PHONE CONNECTED and RX packets.
+          8. Press Win+R, run joy.cpl, and verify the virtual Xbox 360 controller.
+
+          Packet format:
+          V7|LX=...|LY=...|RX=...|RY=...|LT=...|RT=...|BTN=...|COUNT=...
+
+          BTN uses the standard XUSB/XInput bit values, so multiple buttons can be held
+          simultaneously and are forwarded as one complete button state.
+          '@ | Set-Content README.txt -Encoding UTF8
+
+      - name: Build Windows V7
+        shell: pwsh
+        run: |
+          dotnet restore win/ControllerBridgeV7.csproj
+          dotnet publish win/ControllerBridgeV7.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -o publish
+
+      - name: Upload Windows V7
+        uses: actions/upload-artifact@v4
+        with:
+          name: ControllerBridge-V7-Windows
+          path: |
+            publish/**
+            Setup-Firewall.cmd
+            README.txt
