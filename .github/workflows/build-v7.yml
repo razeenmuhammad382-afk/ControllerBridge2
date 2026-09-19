@@ -1,11 +1,11 @@
-name: Build Controller Bridge V7
+name: Build Controller Bridge V7.1
 
 on:
   workflow_dispatch:
 
 jobs:
   android:
-    name: Build Android V7
+    name: Build Android V7.1
     runs-on: ubuntu-latest
 
     steps:
@@ -54,8 +54,8 @@ jobs:
                   applicationId 'com.example.controllerbridge'
                   minSdk 26
                   targetSdk 35
-                  versionCode 7
-                  versionName '7.0'
+                  versionCode 8
+                  versionName '7.1'
               }
 
               compileOptions {
@@ -113,6 +113,7 @@ jobs:
           import android.view.InputDevice;
           import android.view.KeyEvent;
           import android.view.MotionEvent;
+          import android.view.inputmethod.EditorInfo;
           import android.widget.Button;
           import android.widget.EditText;
           import android.widget.LinearLayout;
@@ -144,6 +145,8 @@ jobs:
 
               private volatile float lx, ly, rx, ry, lt, rt;
               private volatile int buttons;
+              private volatile int keyButtons;
+              private volatile int hatButtons;
 
               @Override
               protected void onCreate(Bundle savedInstanceState) {
@@ -162,13 +165,20 @@ jobs:
                   ipInput = new EditText(this);
                   ipInput.setSingleLine(true);
                   ipInput.setHint("Windows IPv4 address");
-                  ipInput.setInputType(InputType.TYPE_CLASS_PHONE);
+                  ipInput.setInputType(
+                      InputType.TYPE_CLASS_TEXT |
+                      InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD |
+                      InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                  );
+                  ipInput.setImeOptions(EditorInfo.IME_ACTION_NEXT);
+                  ipInput.setSingleLine(true);
 
                   portInput = new EditText(this);
                   portInput.setSingleLine(true);
                   portInput.setText("5555");
                   portInput.setHint("TCP port");
                   portInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+                  portInput.setImeOptions(EditorInfo.IME_ACTION_DONE);
 
                   connectButton = new Button(this);
                   connectButton.setText("CONNECT TO WINDOWS");
@@ -209,6 +219,29 @@ jobs:
                   );
               }
 
+              private boolean isValidIpv4(String ip) {
+                  String[] parts = ip.split("\\.", -1);
+                  if (parts.length != 4) return false;
+                  for (String part : parts) {
+                      if (part.isEmpty() || part.length() > 3) return false;
+                      for (int i = 0; i < part.length(); i++) {
+                          if (!Character.isDigit(part.charAt(i))) return false;
+                      }
+                      try {
+                          int n = Integer.parseInt(part);
+                          if (n < 0 || n > 255) return false;
+                      } catch (NumberFormatException e) {
+                          return false;
+                      }
+                  }
+                  return true;
+              }
+
+              private boolean textFieldFocused() {
+                  android.view.View focused = getCurrentFocus();
+                  return focused == ipInput || focused == portInput;
+              }
+
               private void toggleConnection() {
                   if (connected) {
                       disconnect();
@@ -231,8 +264,8 @@ jobs:
                       return;
                   }
 
-                  if (ip.isEmpty()) {
-                      pcStatus.setText("🔴 PC: ENTER IPv4");
+                  if (!isValidIpv4(ip)) {
+                      pcStatus.setText("🔴 PC: INVALID IPv4");
                       return;
                   }
 
@@ -313,6 +346,11 @@ jobs:
 
               @Override
               public boolean dispatchKeyEvent(KeyEvent event) {
+                  // Controller events must never steal keyboard input from IP/port fields.
+                  if (textFieldFocused()) {
+                      return super.dispatchKeyEvent(event);
+                  }
+
                   InputDevice d = InputDevice.getDevice(event.getDeviceId());
 
                   if (d != null) {
@@ -349,10 +387,11 @@ jobs:
                   }
 
                   if (down) {
-                      buttons |= mask;
+                      keyButtons |= mask;
                   } else {
-                      buttons &= ~mask;
+                      keyButtons &= ~mask;
                   }
+                  buttons = keyButtons | hatButtons;
 
                   final String name = buttonName(code);
                   runUi(() -> {
@@ -407,6 +446,11 @@ jobs:
 
               @Override
               public boolean dispatchGenericMotionEvent(MotionEvent event) {
+                  // Joystick motion must not alter controller values while typing.
+                  if (textFieldFocused()) {
+                      return super.dispatchGenericMotionEvent(event);
+                  }
+
                   if (event.getAction() == MotionEvent.ACTION_MOVE &&
                       (event.getSource() & InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {
 
@@ -421,11 +465,12 @@ jobs:
                       float hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X);
                       float hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y);
 
-                      buttons &= ~0x000F;
-                      if (hatY < -0.5f) buttons |= 0x0001;
-                      if (hatY > 0.5f) buttons |= 0x0002;
-                      if (hatX < -0.5f) buttons |= 0x0004;
-                      if (hatX > 0.5f) buttons |= 0x0008;
+                      hatButtons = 0;
+                      if (hatY < -0.5f) hatButtons |= 0x0001;
+                      if (hatY > 0.5f) hatButtons |= 0x0002;
+                      if (hatX < -0.5f) hatButtons |= 0x0004;
+                      if (hatX > 0.5f) hatButtons |= 0x0008;
+                      buttons = keyButtons | hatButtons;
 
                       runUi(() -> {
                           stateView.setText(stateText());
@@ -507,17 +552,17 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build Android V7 APK
+      - name: Build Android V7.1 APK
         run: gradle assembleDebug
 
       - name: Upload Android V7 APK
         uses: actions/upload-artifact@v4
         with:
-          name: ControllerBridge-V7-APK
+          name: ControllerBridge-V7.1-APK
           path: app/build/outputs/apk/debug/app-debug.apk
 
   windows:
-    name: Build Windows V7
+    name: Build Windows V7.1
     runs-on: windows-latest
 
     steps:
@@ -826,7 +871,7 @@ jobs:
           simultaneously and are forwarded as one complete button state.
           '@ | Set-Content README.txt -Encoding UTF8
 
-      - name: Build Windows V7
+      - name: Build Windows V7.1
         shell: pwsh
         run: |
           dotnet restore win/ControllerBridgeV7.csproj
